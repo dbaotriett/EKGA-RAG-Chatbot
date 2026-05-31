@@ -1,78 +1,62 @@
-# HỆ THỐNG TRUY XUẤT VÀ TẠO VĂN BẢN (RAG) DÀNH CHO HỎI ĐÁP NỘI BỘ
+# RETRIEVAL-AUGMENTED GENERATION (RAG) SYSTEM FOR INTERNAL Q&A
 
 ## 1. Giới thiệu chung
-Tài liệu này mô tả kiến trúc và quy trình triển khai hệ thống Hỏi-Đáp nội bộ dựa trên phương pháp Retrieval-Augmented Generation (RAG). Hệ thống được thiết kế để vận hành cục bộ (local environment), nhằm đảm bảo tính bảo mật của dữ liệu thông qua việc tích hợp các mô hình mã nguồn mở và cơ sở dữ liệu vector độc lập.
+Tài liệu này mô tả architecture và quy trình triển khai hệ thống Q&A nội bộ dựa trên phương pháp Retrieval-Augmented Generation (RAG). Hệ thống được thiết kế để vận hành trên local environment, nhằm đảm bảo data privacy thông qua việc tích hợp các open-source models và vector database độc lập.
 
-## 2. Kiến trúc hệ thống
-Hệ thống được chia thành ba luồng xử lý chính:
+## 2. System Architecture
+Pipeline của hệ thống được chia thành ba luồng xử lý chính:
 
-* **Xử lý và Lưu trữ dữ liệu (Data Ingestion):** Sử dụng thư viện Docling để phân tích cú pháp các định dạng tài liệu (PDF, DOCX, PPTX, HTML, MD). Quá trình tiền xử lý tích hợp thuật toán băm MD5 cho từng phân đoạn văn bản (chunk) nhằm loại bỏ dữ liệu trùng lặp (deduplication) trước khi thực hiện nhúng (embedding) và lưu trữ vào ChromaDB.
-* **Truy xuất và Xếp hạng (Retrieval & Reranking):** Hỗ trợ ba cấu hình truy xuất: Maximal Marginal Relevance (MMR), Cosine Similarity, và Threshold-based Similarity. Các tài liệu sau khi truy xuất được đánh giá và xếp hạng lại bằng mô hình Cross-Encoder (`BAAI/bge-reranker-v2-m3`) để tối ưu hóa độ chính xác của ngữ cảnh cung cấp cho mô hình ngôn ngữ.
-* **Sinh văn bản (Generation):** Ngữ cảnh sau khi được lọc sẽ kết hợp với câu hỏi của người dùng và đưa vào mô hình ngôn ngữ lớn (LLM) `qwen2.5:3b-instruct` thông qua nền tảng Ollama, hỗ trợ trả kết quả theo thời gian thực (streaming response).
+* **Data Ingestion:** Sử dụng thư viện Docling để parse các định dạng document (PDF, DOCX, PPTX, HTML, MD). Quá trình preprocessing tích hợp MD5 Hashing cho từng text chunk nhằm loại bỏ dữ liệu trùng lặp (deduplication) trước khi thực hiện embedding và index vào ChromaDB.
+* **Retrieval & Reranking:** Hỗ trợ ba chiến lược retrieval: Maximal Marginal Relevance (MMR), Cosine Similarity, và Threshold-based Similarity. Các document sau khi retrieve được rerank bằng Cross-Encoder model (`BAAI/bge-reranker-v2-m3`) để tối ưu hóa độ chính xác của context cung cấp cho LLM.
+* **Generation:** Context sau khi filter sẽ được kết hợp với query của user và đưa vào Large Language Model (LLM) `qwen2.5:3b-instruct` thông qua nền tảng Ollama, hỗ trợ trả kết quả dạng streaming response.
 
-### Sơ đồ luồng dữ liệu (Data Flow Diagram)
+### Data Flow Diagram
 
 ```mermaid
-graph TD
-    classDef database fill:#f9f6f7,stroke:#333,stroke-width:2px;
-    classDef process fill:#e1f5fe,stroke:#0288d1,stroke-width:1px;
-    classDef model fill:#e8f5e9,stroke:#388e3c,stroke-width:1px;
-    classDef user fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
+flowchart TD
+    User((User))
 
-    User((Người dùng)):::user
-
-    subgraph Data Ingestion [Giai đoạn 1: Nạp và Xử lý Dữ liệu]
+    subgraph Ingestion [Phase 1: Data Ingestion]
         direction TB
-        Docs[/Tài liệu PDF, DOCX, HTML.../]:::process
-        Docling[Docling Parser & Text Cleaner]:::process
-        Splitter[Recursive Character Text Splitter]:::process
-        Hash[MD5 Hashing - Lọc Trùng lặp]:::process
-        Embed1[qwen3-embedding:0.6b]:::model
-        Chroma[(ChromaDB Vector Store)]:::database
-
-        Docs --> Docling --> Splitter --> Hash --> Embed1 --> Chroma
+        Docs[Documents: PDF, DOCX, HTML] --> Parser[Docling Parser & Cleaner]
+        Parser --> Splitter[Recursive Text Splitter]
+        Splitter --> Hash[MD5 Hashing / Deduplication]
+        Hash --> Embed1[Embedding: qwen3-embedding]
+        Embed1 --> DB[(ChromaDB Vector Store)]
     end
 
-    subgraph Retrieval [Giai đoạn 2: Truy xuất và Xếp hạng]
+    subgraph Retrieval [Phase 2: Retrieval & Reranking]
         direction TB
-        Query[Câu hỏi truy vấn]:::process
-        Embed2[qwen3-embedding:0.6b]:::model
-        Search[Tìm kiếm: MMR / Similarity / Threshold]:::process
-        Reranker[Cross-Encoder: BAAI/bge-reranker-v2-m3]:::model
-        Context[Top 4 Ngữ cảnh lọc qua Threshold]:::process
-
-        Query --> Embed2 --> Search
-        Chroma -. Top 16 Chunks .-> Search
-        Search --> Reranker --> Context
+        InputQuery[User Query] --> Embed2[Embedding: qwen3-embedding]
+        Embed2 --> Search[Vector Search: MMR / Similarity]
+        DB -.->|Top 16 Chunks| Search
+        Search --> Reranker[Cross-Encoder: bge-reranker]
+        Reranker --> Context[Top 4 Contexts]
     end
 
-    subgraph Generation [Giai đoạn 3: Sinh Văn bản]
+    subgraph Generation [Phase 3: Generation]
         direction TB
-        Prompt[Prompt Template]:::process
-        LLM[qwen2.5:3b-instruct]:::model
-        Output[/Streaming Response/]:::process
-
-        Context --> Prompt
-        Query --> Prompt
-        Prompt --> LLM --> Output
+        Context --> Prompt[Prompt Template]
+        InputQuery --> Prompt
+        Prompt --> LLM[LLM: qwen2.5:3b-instruct]
+        LLM --> Output[/Streaming Response/]
     end
 
-    User -- "Đặt câu hỏi" --> Query
-    Output -- "Trả kết quả" --> User
+    User -->|Input Query| InputQuery
+    Output -->|Return Response| User
 ```
 
-## 3. Môi trường và Công nghệ
-* **Ngôn ngữ lập trình:** Python 3.10+
-* **Khung phát triển (Framework):** LangChain
-* **Phân tích tài liệu:** Docling
-* **Cơ sở dữ liệu Vector:** ChromaDB
-* **Mô hình trích xuất đặc trưng (Embedding Model):** `qwen3-embedding:0.6b` (qua Ollama)
-* **Mô hình ngôn ngữ (Generative Model):** `qwen2.5:3b-instruct` (qua Ollama)
-* **Đo lường và Đánh giá (Evaluation):** Framework Ragas (sử dụng `qwen2.5:7b-instruct` làm mô hình giám khảo).
+## 3. Tech Stack
+* **Programming Language:** Python 3.10+
+* **Framework:** LangChain
+* **Document Parsing:** Docling
+* **Vector Database:** ChromaDB
+* **Embedding Model:** `qwen3-embedding:0.6b` (qua Ollama)
+* **Generative Model (LLM):** `qwen2.5:3b-instruct` (qua Ollama)
 
-## 4. Hướng dẫn thiết lập môi trường
+## 4. Environment Setup
 
-**Khởi tạo mã nguồn và thư viện:**
+**Khởi tạo source code và dependencies:**
 ```bash
 git clone [https://github.com/dbaotriett/EKGA-RAG-Chatbot.git](https://github.com/dbaotriett/EKGA-RAG-Chatbot.git)
 cd EKGA-RAG-Chatbot
@@ -82,39 +66,30 @@ pip install -r requirements.txt
 ```
 
 **Khởi tạo dịch vụ Ollama:**
-Yêu cầu hệ thống đã cài đặt Ollama. Thực thi các lệnh sau để tải các trọng số mô hình cần thiết:
+Yêu cầu hệ thống đã cài đặt Ollama. Thực thi các lệnh sau để pull các models cần thiết:
 ```bash
 ollama pull qwen2.5:3b-instruct
 ollama pull qwen3-embedding:0.6b
-ollama pull qwen2.5:7b-instruct
-ollama pull nomic-embed-text
 ```
 
 ## 5. Hướng dẫn vận hành
 
-### 5.1. Nạp dữ liệu (Ingestion)
-Đặt các tệp tài liệu cần phân tích vào thư mục `./data/`, sau đó thực thi:
+### 5.1. Data Ingestion
+Đặt các document cần xử lý vào thư mục `./data/`, sau đó thực thi:
 ```bash
 python ingest.py
 ```
-* `--clear`: Xóa dữ liệu tồn tại trong ChromaDB trước khi nạp.
-* `--no-dedup`: Bỏ qua quá trình kiểm tra MD5, nạp toàn bộ phân đoạn văn bản.
+* `--clear`: Xóa dữ liệu tồn tại trong ChromaDB trước khi ingest.
+* `--no-dedup`: Bỏ qua quá trình MD5 hashing, ingest toàn bộ chunks.
 
-### 5.2. Thực thi truy vấn (Query)
-Khởi động giao diện dòng lệnh để tương tác với hệ thống:
+### 5.2. Query & Inference
+Khởi động Command Line Interface (CLI) để tương tác với hệ thống:
 ```bash
 python query.py
 ```
-* `--search [mmr|similarity|threshold]`: Chỉ định phương pháp truy xuất cơ sở.
-* `--no-stream`: Vô hiệu hóa chế độ trả kết quả theo từng token.
-* `--debug`: Chế độ nhà phát triển, hiển thị chi tiết ngữ cảnh trích xuất, điểm số xếp hạng (reranker score) và số lượng ký tự.
+* `--search [mmr|similarity|threshold]`: Chỉ định retrieval strategy.
+* `--no-stream`: Vô hiệu hóa chế độ streaming response.
+* `--debug`: Kích hoạt debug mode, hiển thị chi tiết extracted context, reranker score và token size.
 
-### 5.3. Đánh giá hệ thống (Evaluation)
-Thực thi quá trình đánh giá hiệu suất hệ thống trên tập dữ liệu chuẩn (Benchmark) gồm 50 câu hỏi:
-```bash
-python evaluate_rag.py
-```
-Kết quả đo lường bốn chỉ số (Faithfulness, Answer Relevancy, Context Precision, Context Recall) sẽ được xuất ra tệp định dạng CSV (`rag_evaluation_results.csv`).
-
-## 6. Giấy phép
+## 6. License
 Mã nguồn được phân phối theo giấy phép MIT. Chi tiết tham khảo tại tệp `LICENSE`.
